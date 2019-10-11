@@ -6,7 +6,7 @@
 SecireStore
 """
 
-import logging
+import logging, re
 
 from telegram import ReplyKeyboardMarkup
 from telegram.ext import (Updater, CommandHandler, MessageHandler, Filters,
@@ -20,7 +20,15 @@ logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s
 
 logger = logging.getLogger(__name__)
 
-CHOOSING, TYPING_REPLY, TYPING_CHOICE = range(3)
+IDLE, SET_PASSWORD, WEAK_PASSWORD, STORE, REVIEW = range(5)
+
+BTN_PWD_STRONGER = 'Create stronger'
+BTN_PWD_LEAVEWEAK = 'Leave weak'
+BTN_PWD_TRYAGAIN = 'Try again'
+BTN_PWD_STARTOVER = 'Start over'
+BTN_ENCODE = 'Encode'
+BTN_DECODE = 'Decode'
+BTN_PWD_CHANGE = 'Change password'
 
 reply_keyboard = [['Age', 'Favourite colour'],
                   ['Number of siblings', 'Something else...'],
@@ -39,12 +47,63 @@ def facts_to_str(user_data):
 
 def start(update, context):
     update.message.reply_text(
-        "Hi! My name is Doctor Botter. I will hold a more complex conversation with you. "
-        "Why don't you tell me something about yourself?",
-        reply_markup=markup)
+        "Hi! My name is Charles. You can trust me all your secrets and nobody will every have known about them except you. "
+        "Please send me the password to start.\n\n"
+        "Notice, there is no way recover data if the password is lost! So, please, remember it carefully!!!")
 
-    return CHOOSING
+    return SET_PASSWORD
 
+def is_password_weak(pwd):
+    return not re.match(r'[A-Za-z0-9@#$%^&+=]{8,}', pwd)
+
+def check_password(upd, ctx):
+    text = upd.message.text
+    # First entry of password
+    if 'password' not in ctx.user_data:
+        ctx.user_data['password'] = text
+        if is_password_weak(text):
+            upd.message.reply_text('The password you entered is weak and does not provide enough security!\n'
+                                   'It is highly recommended to come up with reliable password, which satisfies:\n'
+                                   '- At least 8 symbols\n'
+                                   '- Consist of a-z, A-Z, 0-9 and/or special symbols @#$%^&+=\n\n'
+                                   'Do you want to change your opinion and create stronger password?',
+                                   reply_markup=ReplyKeyboardMarkup([[BTN_PWD_STRONGER, BTN_PWD_LEAVEWEAK]], one_time_keyboard=True))
+            upd.message.delete()
+            return WEAK_PASSWORD
+    # Repetition of password
+    else:
+        if ctx.user_data['password'] != text:
+            upd.message.reply_text('Ooopsie! The passwords do not match! Please try again or create new password.',
+                                   reply_markup=ReplyKeyboardMarkup([[BTN_PWD_TRYAGAIN, BTN_PWD_STARTOVER]], one_time_keyboard=True))
+            upd.message.delete()
+            return WEAK_PASSWORD
+        else:
+            ctx.user_data.pop('password', None)
+            upd.message.reply_text('Password successfully created! You can now begin securely storing your data',
+                                   reply_keyboard=ReplyKeyboardMarkup([[BTN_ENCODE, BTN_DECODE],
+                                                                       [BTN_PWD_CHANGE]], one_time_keyboard=True))
+            upd.message.delete()
+            return IDLE
+
+def weak_password(upd, ctx):
+    text = upd.message.text
+    if text == BTN_PWD_STRONGER:
+        ctx.user_data.pop('password', None)
+        upd.message.reply_text('Very nice decision! Please send me strong password now.\n'
+                               'Notice, there is no way recover data if the password is lost! So, please, remember it carefully!!!')
+        return SET_PASSWORD
+    elif text == BTN_PWD_LEAVEWEAK:
+        upd.message.reply_text('I\'m only offering and it is your responsibility for this decision.\n'
+                               'Please repeat the password again, so I can check that you remembered it properly')
+        return SET_PASSWORD
+    elif text == BTN_PWD_TRYAGAIN:
+        upd.message.reply_text('Please send me the password again (and remember it properly!).')
+        return SET_PASSWORD
+    elif text == BTN_PWD_STARTOVER:
+        ctx.user_data.pop('password', None)
+        upd.message.reply_text('That\'s a good idea. Create a new strong password, remember it and send it to me.')
+        return SET_PASSWORD
+    pass
 
 def regular_choice(update, context):
     text = update.message.text
@@ -109,19 +168,15 @@ def main():
         entry_points=[CommandHandler('start', start)],
 
         states={
-            CHOOSING: [MessageHandler(Filters.regex('^(Age|Favourite colour|Number of siblings)$'),
+            IDLE: [MessageHandler(Filters.regex('^(Age|Favourite colour|Number of siblings)$'),
                                       regular_choice),
                        MessageHandler(Filters.regex('^Something else...$'),
                                       custom_choice)
                        ],
 
-            TYPING_CHOICE: [MessageHandler(Filters.text,
-                                           regular_choice)
-                            ],
+            SET_PASSWORD: [MessageHandler(Filters.text, check_password)],
 
-            TYPING_REPLY: [MessageHandler(Filters.text,
-                                          received_information),
-                           ],
+            WEAK_PASSWORD: [MessageHandler(Filters.text, weak_password)],
         },
 
         fallbacks=[MessageHandler(Filters.regex('^Done$'), done)]
