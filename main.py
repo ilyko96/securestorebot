@@ -219,11 +219,22 @@ def ask_password(upd, ctx):
 		ctx.user_data.clear()
 		upd.message.reply_text('Your data was successfully destroyed! Our database now is by {0} records thinner ;)\n'
 							   'Have a nice day and feel free to come back any time you want.\n'
-							   'Use command /start (or the button below) to start over.'.format(ndel_recs))
+							   'Use command /start (or the button below) to start over.'.format(ndel_recs),
+							   reply_markup=ReplyKeyboardMarkup([[BTN_START]], one_time_keyboard=True))
 		return STATE_START
 
+# Logs user out, making him unauthorized
+def logout(upd, ctx):
+	ctx.bot.send_message(upd.message.chat_id,
+						 text='You were successfully logged out!\n'
+							  'Just send me your password whenever you want log in back again.', reply_markup=ReplyKeyboardRemove())
+	update_authorization_timer(upd, ctx, unauthorize=True)
+	ctx.user_data['password_mode'] = MODE_PWD_TEST
+	return STATE_TYPING_PASSWORD
+
 # Requests user to enter data
-def ask_encrypt(upd, ctx):
+# TODO: only supports text messages now. Extend!
+def ask_record(upd, ctx):
 	if upd.message.text == BTN_RECORD:
 		upd.message.reply_text(
 			"Tell me your secret")
@@ -270,7 +281,8 @@ def main():
 
 		states={
 			STATE_START: [
-				CommandHandler('start', start)
+				CommandHandler('start', start),
+				MessageHandler(Filters.regex('^{}$'.format(BTN_START)), start)
 			],
 			STATE_TYPING_PASSWORD: [
 				MessageHandler(Filters.all, check_password)
@@ -279,7 +291,8 @@ def main():
 				MessageHandler(Filters.text, ask_password)
 			],
 			STATE_IDLE: [
-				MessageHandler(Filters.regex('^{0}$'.format(BTN_RECORD)), ask_encrypt)
+				MessageHandler(Filters.regex('^{0}$'.format(BTN_RECORD)), ask_record),
+				MessageHandler(Filters.regex('^{0}$'.format(BTN_LOGOUT)), logout)
 			],
 			ASK_ENCODE: [
 				MessageHandler(Filters.text, encrypt_data)
