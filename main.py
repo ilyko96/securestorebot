@@ -27,17 +27,17 @@ markup_idle = [[BTN_RECORD, BTN_BROWSE], [BTN_SETTINGS, BTN_LOGOUT]]
 
 
 # Checks and actions needed to be performed on each atomic signal received from user
-# 1. Leave groups/channels and stay only in private chats
-# 2. Check authorization state and update authorization timer
 def every_signal_checks(upd, ctx):
+	# Leave all groups/channels and stay only in private chats
 	if not upd.message.chat.type == upd.message.chat.PRIVATE:
 		logger.warning("Added to group #{0}! Leaving...".format(upd.message.chat_id))
 		upd.message.bot.leave_chat(upd.message.chat_id)
-	elif check_authorization(ctx):
+	# Check authorization state and update authorization timer
+	elif is_authorized(ctx):
 		update_authorization_timer(upd, ctx)
 
 # Checks if authorization expired and returns True - is still authorized, False - o\w
-def check_authorization(ctx):
+def is_authorized(ctx):
 	return 'authorized' in ctx.user_data \
 			and ctx.user_data['authorized'] is not None \
 			and timestamp_now() - ctx.user_data['authorized'] <= 30
@@ -63,12 +63,16 @@ def authorization_alarm(alarm_ctx):
 def update_authorization_timer(upd, ctx, unauthorize=False):
 	ctx.user_data['authorized'] = None if unauthorize else timestamp_now()
 	logger.info('update_authorization_timer: authorized={0}   unauthorize={1}'.format(ctx.user_data['authorized'], unauthorize))
-	if not unauthorize:
+	if unauthorize:
+		for job in ctx.job_queue.jobs():
+			job.schedule_removal()
+		logger.info('update_authorization_timer: all jobs removed'.format(ctx.user_data['authorized'], unauthorize))
+	else:
 		if 'authorized_job' in ctx.user_data:
-			logger.info('update_authorization_timer: job_removed'.format(ctx.user_data['authorized'], unauthorize))
+			logger.info('update_authorization_timer: job removed'.format(ctx.user_data['authorized'], unauthorize))
 			ctx.user_data['authorized_job'].schedule_removal()
 		ctx.user_data['authorized_job'] = ctx.job_queue.run_once(authorization_alarm, 30, context={'upd': upd, 'ctx': ctx})
-		logger.info('update_authorization_timer: job_created'.format(ctx.user_data['authorized'], unauthorize))
+		logger.info('update_authorization_timer: job created'.format(ctx.user_data['authorized'], unauthorize))
 
 # Entry point
 def start(upd, ctx):
@@ -90,7 +94,7 @@ def start(upd, ctx):
 		ctx.user_data['password'] = pwd.encode()
 
 		# If authorization still valid
-		if check_authorization(ctx):
+		if is_authorized(ctx):
 			ctx.user_data['password_mode'] = MODE_PWD_AUTHORIZED
 			upd.message.reply_text(
 				"Hi again! My name is Charles. You can trust me all your secrets and nobody will ever have known about them except you.\n"
@@ -117,7 +121,7 @@ def start(upd, ctx):
 	return STATE_TYPING_PASSWORD
 
 # Checks given password
-def check_password(upd, ctx):
+def received_password(upd, ctx):
 	# this is triggered for every signal, filter here only those, which have text
 	if upd.message.text is None or len(upd.message.text) == 0:
 		return
@@ -186,7 +190,7 @@ def check_password(upd, ctx):
 
 # TODO: change elifs to handlers (or just somehow reorganize properly)
 # Handles user input password
-def ask_password(upd, ctx):
+def password_btn_clicked(upd, ctx):
 	text = upd.message.text
 	chat_id = upd.message.chat_id
 
@@ -234,11 +238,11 @@ def logout(upd, ctx):
 
 # Requests user to enter data
 # TODO: only supports text messages now. Extend!
-def ask_record(upd, ctx):
+def idle_button_clicked(upd, ctx):
 	if upd.message.text == BTN_RECORD:
 		upd.message.reply_text(
 			"Tell me your secret")
-		return ASK_ENCODE
+		return STATE_TYPING_RECORD
 
 # Receives message, encrypts and stores into DB
 def encrypt_data(upd, ctx):
@@ -247,20 +251,54 @@ def encrypt_data(upd, ctx):
 	encrypted = encrypt_string(upd.message.text, key)
 	upd.message.delete()
 
-	rec = dbh.create_record(upd.message.chat_id, encrypted)
+	ctx.user_data['data'] = encrypted
+
+	upd.message.reply_text(
+		"Your message of length {0} has been successfully encrypted. Do you want to store it?".format(ln),
+		reply_markup=ReplyKeyboardMarkup([[BTN_RECORD_SAVE, BTN_RECORD_CANCEL]], one_time_keyboard=True))
+	return STATE_CONFIRMING_RECORD
+
+# Handles user confirmation for storing created record
+def confirm_adding_record(upd, ctx):
+	# Should never be true due to code consistency
+	if 'data' not in ctx.user_data or ctx.user_data['data'] is None:
+		logger.warning('No data found in context for \'chat_id\'={}! Continuing without storing data!'.format(upd.message.chat_id))
+		upd.message.reply_text(
+			"Error occured while saving your data. This case is already reported. Please try again later",
+			reply_markup=ReplyKeyboardMarkup(markup_idle, one_time_keyboard=True))
+
+	rec = dbh.create_record(upd.message.chat_id, ctx.user_data['data'])
 
 	if rec != 1:
-		logger.warning('Could not save record to database. chat_id=\'{0}\', data=\'{1}\''.format(upd.message.chat_id, encrypted))
+		logger.warning(
+			'Could not save record to database. chat_id=\'{0}\', data=\'{1}\''.format(upd.message.chat_id, ctx.user_data['data']))
 		upd.message.reply_text(
-			"Error occured while saving your data. This case is already reported. Please try again later".format(ln),
+			"Error occured while saving your data. This case is already reported. Please try again later",
 			reply_markup=ReplyKeyboardMarkup(markup_idle, one_time_keyboard=True))
 		return STATE_IDLE
 
+	ln = len(ctx.user_data['data'])
+	ctx.user_data.pop('data', None)
 	upd.message.reply_text(
-		"Your message of length {0} has been successfully encrypted and saved".format(ln),
+		"Your message of length {0} has been successfully saved".format(ln),
 		reply_markup=ReplyKeyboardMarkup(markup_idle, one_time_keyboard=True))
 	return STATE_IDLE
 
+# Handles user cancellation for storing created record
+def cancel_adding_record(upd, ctx):
+	ln = len(ctx.user_data['data'])
+	ctx.user_data.pop('data', None)
+	upd.message.reply_text(
+		"Your message of length {0} has been successfully deleted.".format(ln),
+		reply_markup=ReplyKeyboardMarkup(markup_idle, one_time_keyboard=True))
+	return STATE_IDLE
+
+# Handles click on button 'Browse' from STATE_IDLE
+def browse_records(upd, ctx):
+	upd.message.reply_text(
+		"Browse function is not implemented yet ;( Sorry..",
+		reply_markup=ReplyKeyboardMarkup(markup_idle, one_time_keyboard=True))
+	return STATE_IDLE
 
 def error(update, context):
 	"""Log Errors caused by Updates."""
@@ -285,17 +323,22 @@ def main():
 				MessageHandler(Filters.regex('^{}$'.format(BTN_START)), start)
 			],
 			STATE_TYPING_PASSWORD: [
-				MessageHandler(Filters.all, check_password)
+				MessageHandler(Filters.all, received_password)
 			],
 			STATE_CHOOSE_PASSWORD_ACTION: [
-				MessageHandler(Filters.text, ask_password)
+				MessageHandler(Filters.text, password_btn_clicked)
 			],
 			STATE_IDLE: [
-				MessageHandler(Filters.regex('^{0}$'.format(BTN_RECORD)), ask_record),
-				MessageHandler(Filters.regex('^{0}$'.format(BTN_LOGOUT)), logout)
+				MessageHandler(Filters.regex('^{0}$'.format(BTN_RECORD)), idle_button_clicked),
+				MessageHandler(Filters.regex('^{0}$'.format(BTN_LOGOUT)), logout),
+				MessageHandler(Filters.regex('^{0}$'.format(BTN_BROWSE)), browse_records)
 			],
-			ASK_ENCODE: [
+			STATE_TYPING_RECORD: [
 				MessageHandler(Filters.text, encrypt_data)
+			],
+			STATE_CONFIRMING_RECORD: [
+				MessageHandler(Filters.regex('^{0}$'.format(BTN_RECORD_SAVE)), confirm_adding_record),
+				MessageHandler(Filters.regex('^{0}$'.format(BTN_RECORD_CANCEL)), cancel_adding_record)
 			]
 		},
 
