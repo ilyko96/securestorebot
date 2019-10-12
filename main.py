@@ -39,6 +39,8 @@ MODE_PWD_SET, MODE_PWD_TEST, MODE_PWD_AUTHORIZED = range(3)
 
 markup_idle = [[BTN_ENCRYPT, BTN_DECRYPT], [BTN_PWD_CHANGE]]
 
+conv_handler = None
+
 # Checks and actions needed to be performed on each atomic signal received from user
 # 1. Leave groups/channels and stay only in private chats
 # 2. Check authorization state and update authorization timer
@@ -57,6 +59,7 @@ def check_authorization(ctx):
 
 # Is called when user is inactive for specified time. Shows corresponding msg and TODO: changes conversation state
 def authorization_alarm(alarm_ctx):
+	global conv_handler
 	job = alarm_ctx.job
 	upd = job.context['upd']
 	ctx = job.context['ctx']
@@ -65,8 +68,11 @@ def authorization_alarm(alarm_ctx):
 	ctx.bot.send_message(chat_id, text='You were inactive for 30 seconds, so now you need to prove your identity.\n'
 									   'Enter the password, please.', reply_markup=ReplyKeyboardRemove())
 	ctx.user_data.pop('authorized_job', None)
+	update_authorization_timer(upd, ctx, unauthorize=True)
+	ctx.user_data['password_mode'] = MODE_PWD_TEST
 	logger.info('authorization_alarm')
-	return ASK_PASSWORD
+
+	conv_handler.update_state(ASK_PASSWORD, conv_handler._get_key(upd))
 
 # Called each time, when user makes action. Sets up new alarm instead of prev and updates authorization timestamp
 def update_authorization_timer(upd, ctx, unauthorize=False):
@@ -138,7 +144,7 @@ def check_password(upd, ctx):
 
 	# Nothing to do if already authorized
 	if ctx.user_data['password_mode'] == MODE_PWD_AUTHORIZED:
-		upd.message.reply_text('Use menu buttons to securely store your secrets',
+		upd.message.reply_text('Authorized successfully! Use menu buttons to securely store your secrets',
 							   reply_markup=ReplyKeyboardMarkup(markup_idle, one_time_keyboard=True))
 		return IDLE
 
@@ -245,8 +251,8 @@ def error(update, context):
 	"""Log Errors caused by Updates."""
 	logger.warning('Update "%s" caused error "%s"', update, context.error)
 
-
 def main():
+	global conv_handler
 	# Create the Updater and pass it your bot's token.
 	# Make sure to set use_context=True to use the new context based callbacks
 	# Post version 12 this will no longer be necessary
@@ -262,10 +268,18 @@ def main():
 		entry_points=[CommandHandler('start', start)],
 
 		states={
-			ASK_PASSWORD: [MessageHandler(Filters.text, check_password)],
-			ACTION_PASSWORD: [MessageHandler(Filters.text, ask_password)],
-			IDLE: [MessageHandler(Filters.regex('^{0}$'.format(BTN_ENCRYPT)), ask_encrypt)],
-			ASK_ENCODE: [MessageHandler(Filters.text, encrypt_data)]
+			ASK_PASSWORD: [
+				MessageHandler(Filters.text, check_password)
+			],
+			ACTION_PASSWORD: [
+				MessageHandler(Filters.text, ask_password)
+			],
+			IDLE: [
+				MessageHandler(Filters.regex('^{0}$'.format(BTN_ENCRYPT)), ask_encrypt)
+			],
+			ASK_ENCODE: [
+				MessageHandler(Filters.text, encrypt_data)
+			]
 		},
 
 		fallbacks=[
