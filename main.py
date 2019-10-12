@@ -5,7 +5,6 @@
 """
 SecureStore
 """
-
 import logging
 
 from telegram import ReplyKeyboardMarkup, ReplyKeyboardRemove
@@ -16,30 +15,16 @@ import db_handler as dbh
 from api_token import TOKEN
 from crypto import *
 from util import *
+from constants import *
 
 # Enable logging
-logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-					level=logging.INFO)
-
+logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-UNAUTHORIZED, IDLE, ASK_PASSWORD, ACTION_PASSWORD, ASK_ENCODE = range(5)
-
-BTN_PWD_STRONGER = 'Create stronger'
-BTN_PWD_LEAVEWEAK = 'Leave weak'
-BTN_PWD_TRYAGAIN = 'Try again'
-BTN_PWD_STARTOVER = 'Start over'
-BTN_ENCRYPT = 'Encrypt'
-BTN_DECRYPT = 'Decrypt'
-BTN_PWD_CHANGE = 'Change password'
-BTN_FINISH = 'Finish'
-BTN_PWD_NEW = 'Create new password'
-
-MODE_PWD_SET, MODE_PWD_TEST, MODE_PWD_AUTHORIZED = range(3)
-
-markup_idle = [[BTN_ENCRYPT, BTN_DECRYPT], [BTN_PWD_CHANGE]]
 
 conv_handler = None
+markup_idle = [[BTN_RECORD, BTN_BROWSE], [BTN_SETTINGS, BTN_LOGOUT]]
+
 
 # Checks and actions needed to be performed on each atomic signal received from user
 # 1. Leave groups/channels and stay only in private chats
@@ -72,7 +57,7 @@ def authorization_alarm(alarm_ctx):
 	ctx.user_data['password_mode'] = MODE_PWD_TEST
 	logger.info('authorization_alarm')
 
-	conv_handler.update_state(ASK_PASSWORD, conv_handler._get_key(upd))
+	conv_handler.update_state(STATE_TYPING_PASSWORD, conv_handler._get_key(upd))
 
 # Called each time, when user makes action. Sets up new alarm instead of prev and updates authorization timestamp
 def update_authorization_timer(upd, ctx, unauthorize=False):
@@ -110,9 +95,9 @@ def start(upd, ctx):
 			upd.message.reply_text(
 				"Hi again! My name is Charles. You can trust me all your secrets and nobody will ever have known about them except you.\n"
 				"Use menu buttons to start securely storing your data.",
-				reply_markup=ReplyKeyboardMarkup([[BTN_ENCRYPT, BTN_DECRYPT],
+				reply_markup=ReplyKeyboardMarkup([[BTN_RECORD, BTN_BROWSE],
 												  [BTN_PWD_CHANGE]], one_time_keyboard=True))
-			return IDLE
+			return STATE_IDLE
 		# If no authorization or expired
 		else:
 			ctx.user_data['password_mode'] = MODE_PWD_TEST
@@ -120,7 +105,7 @@ def start(upd, ctx):
 			upd.message.reply_text(
 				"Hi again! My name is Charles. You can trust me all your secrets and nobody will ever have known about them except you.\n"
 				"Please, send me the password first, so I can trust you")
-			return ASK_PASSWORD
+			return STATE_TYPING_PASSWORD
 
 	# If password need to be set
 	ctx.user_data['password_mode'] = MODE_PWD_SET
@@ -129,10 +114,14 @@ def start(upd, ctx):
 		"Hi! My name is Charles. You can trust me all your secrets and nobody will ever have known about them except you. "
 		"Please send me the password to start.\n\n"
 		"Notice, there is no way recover data if the password is lost! So, please, remember it for sure!!!")
-	return ASK_PASSWORD
+	return STATE_TYPING_PASSWORD
 
 # Checks given password
 def check_password(upd, ctx):
+	# this is triggered for every signal, filter here only those, which have text
+	if upd.message.text is None or len(upd.message.text) == 0:
+		return
+
 	is_weak = is_password_weak(upd.message.text)
 	hash = get_hash(upd.message.text)
 	upd.message.delete()
@@ -146,7 +135,7 @@ def check_password(upd, ctx):
 	if ctx.user_data['password_mode'] == MODE_PWD_AUTHORIZED:
 		upd.message.reply_text('Authorized successfully! Use menu buttons to securely store your secrets',
 							   reply_markup=ReplyKeyboardMarkup(markup_idle, one_time_keyboard=True))
-		return IDLE
+		return STATE_IDLE
 
 	# Entered password needs to be used for authorization
 	if ctx.user_data['password_mode'] == MODE_PWD_TEST:
@@ -156,13 +145,14 @@ def check_password(upd, ctx):
 			update_authorization_timer(upd, ctx)
 			upd.message.reply_text('Successfully authorized! You can now begin securely storing your data',
 								   reply_markup=ReplyKeyboardMarkup(markup_idle, one_time_keyboard=True))
-			return IDLE
+			return STATE_IDLE
 		# Entered password is incorrect
 		else:
+			# TODO: add here counter and only show keyboard on 3rd attempt
 			update_authorization_timer(upd, ctx, unauthorize=True)
 			upd.message.reply_text('Ooopsie... Entered password is incorrect! You can try again or set up a new password.\n',
 								   reply_markup=ReplyKeyboardMarkup([[BTN_PWD_TRYAGAIN, BTN_PWD_NEW]], one_time_keyboard=True))
-			return ACTION_PASSWORD
+			return STATE_CHOOSE_PASSWORD_ACTION
 
 	# User needs to set up the password
 	if ctx.user_data['password_mode'] == MODE_PWD_SET:
@@ -176,51 +166,65 @@ def check_password(upd, ctx):
 									   '- Consist of a-z, A-Z, 0-9 and/or special symbols @#$%^&+=\n\n'
 									   'Do you want to change your opinion and create stronger password?',
 									   reply_markup=ReplyKeyboardMarkup([[BTN_PWD_STRONGER, BTN_PWD_LEAVEWEAK]], one_time_keyboard=True))
-				return ACTION_PASSWORD
+				return STATE_CHOOSE_PASSWORD_ACTION
 			else:
 				upd.message.reply_text('Please send me the password again (and remember it properly!).')
-				return ASK_PASSWORD
+				return STATE_TYPING_PASSWORD
 		# Repetition of password
 		else:
 			if ctx.user_data['password'] != hash:
 				upd.message.reply_text('Ooopsie! The passwords do not match! Please try again or create new password.',
 									   reply_markup=ReplyKeyboardMarkup([[BTN_PWD_TRYAGAIN, BTN_PWD_STARTOVER]], one_time_keyboard=True))
-				return ACTION_PASSWORD
+				return STATE_CHOOSE_PASSWORD_ACTION
 			else:
 				dbh.set_password(upd.message.chat_id, ctx.user_data['password'])
 				ctx.user_data['password_mode'] = MODE_PWD_AUTHORIZED
 				update_authorization_timer(upd, ctx)
 				upd.message.reply_text('Password successfully created! You can now begin securely storing your data',
 									   reply_markup=ReplyKeyboardMarkup(markup_idle, one_time_keyboard=True))
-				return IDLE
+				return STATE_IDLE
 
+# TODO: change elifs to handlers (or just somehow reorganize properly)
 # Handles user input password
 def ask_password(upd, ctx):
 	text = upd.message.text
+	chat_id = upd.message.chat_id
+
 	if text == BTN_PWD_STRONGER:
 		ctx.user_data.pop('password', None)
 		upd.message.reply_text('Very nice decision! Please send me strong password now.\n'
 							   'Notice, there is no way recover data if the password is lost! So, please, remember it carefully!!!')
-		return ASK_PASSWORD
+		return STATE_TYPING_PASSWORD
 	elif text == BTN_PWD_LEAVEWEAK:
 		upd.message.reply_text('I\'m only offering and it is your responsibility for this decision.\n'
 							   'Please repeat the password again, so I can check that you remembered it properly')
-		return ASK_PASSWORD
+		return STATE_TYPING_PASSWORD
 	elif text == BTN_PWD_TRYAGAIN:
 		upd.message.reply_text('Send me the password again (and remember it properly!).\n'
 							   'Please check if [CAPS Lock] is off and you are using correct keyboard layout.')
-		return ASK_PASSWORD
+		return STATE_TYPING_PASSWORD
 	elif text == BTN_PWD_STARTOVER:
 		ctx.user_data.pop('password', None)
 		upd.message.reply_text('That\'s a good idea. Create a new strong password, remember it and send it to me.')
-		return ASK_PASSWORD
+		return STATE_TYPING_PASSWORD
 	elif text == BTN_PWD_NEW:
-		upd.message.reply_text('Please send me the password again (and remember it properly!).')
-		return ASK_PASSWORD
+		upd.message.reply_text('This will completely destroy all stored information '
+							   '(incl. current password fingerprint and all records) '
+							   'and start over from scratch.\n'
+							   'If you really want to continue send me the following message: \'{0}\''
+							   .format(CONSCIOUS_CONFIRMATION_MSG.format(10)))
+		return STATE_CHOOSE_PASSWORD_ACTION
+	elif text == CONSCIOUS_CONFIRMATION_MSG.format(10):
+		ndel_chat, ndel_recs = dbh.delete_all(chat_id)
+		ctx.user_data.clear()
+		upd.message.reply_text('Your data was successfully destroyed! Our database now is by {0} records thinner ;)\n'
+							   'Have a nice day and feel free to come back any time you want.\n'
+							   'Use command /start (or the button below) to start over.'.format(ndel_recs))
+		return STATE_START
 
 # Requests user to enter data
 def ask_encrypt(upd, ctx):
-	if upd.message.text == BTN_ENCRYPT:
+	if upd.message.text == BTN_RECORD:
 		upd.message.reply_text(
 			"Tell me your secret")
 		return ASK_ENCODE
@@ -239,12 +243,12 @@ def encrypt_data(upd, ctx):
 		upd.message.reply_text(
 			"Error occured while saving your data. This case is already reported. Please try again later".format(ln),
 			reply_markup=ReplyKeyboardMarkup(markup_idle, one_time_keyboard=True))
-		return IDLE
+		return STATE_IDLE
 
 	upd.message.reply_text(
 		"Your message of length {0} has been successfully encrypted and saved".format(ln),
 		reply_markup=ReplyKeyboardMarkup(markup_idle, one_time_keyboard=True))
-	return IDLE
+	return STATE_IDLE
 
 
 def error(update, context):
@@ -253,29 +257,29 @@ def error(update, context):
 
 def main():
 	global conv_handler
-	# Create the Updater and pass it your bot's token.
-	# Make sure to set use_context=True to use the new context based callbacks
-	# Post version 12 this will no longer be necessary
-	updater = Updater(TOKEN, use_context=True)
 
-	# Get the dispatcher to register handlers
+	updater = Updater(TOKEN, use_context=True)
 	dp = updater.dispatcher
 
+	# Handler for every signal checks: leave groups and check authorization
 	dp.add_handler(MessageHandler(Filters.all, every_signal_checks), group=0)
-
-	# Add conversation handler
+	# Main conversation handler
 	conv_handler = ConversationHandler(
+		# Entry point
 		entry_points=[CommandHandler('start', start)],
 
 		states={
-			ASK_PASSWORD: [
-				MessageHandler(Filters.text, check_password)
+			STATE_START: [
+				CommandHandler('start', start)
 			],
-			ACTION_PASSWORD: [
+			STATE_TYPING_PASSWORD: [
+				MessageHandler(Filters.all, check_password)
+			],
+			STATE_CHOOSE_PASSWORD_ACTION: [
 				MessageHandler(Filters.text, ask_password)
 			],
-			IDLE: [
-				MessageHandler(Filters.regex('^{0}$'.format(BTN_ENCRYPT)), ask_encrypt)
+			STATE_IDLE: [
+				MessageHandler(Filters.regex('^{0}$'.format(BTN_RECORD)), ask_encrypt)
 			],
 			ASK_ENCODE: [
 				MessageHandler(Filters.text, encrypt_data)

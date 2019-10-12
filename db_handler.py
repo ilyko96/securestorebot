@@ -34,7 +34,7 @@ def create_chat_if_not_exist(chat_id, password=None):
 	if len(chats) == 0:
 		return Chat(chat_id=chat_id, password=password).save()
 	elif len(chats) > 1:
-		logger.warning('{1} duplicates for chat_id=\'{0}\' exists! New entry has not been created'.format(chat_id, len(chats) - 1))
+		logger.warning('{1} duplicates for chat_id=\'{0}\' exist! New entry has not been created'.format(chat_id, len(chats) - 1))
 		return len(chats)
 	return 0
 
@@ -44,7 +44,7 @@ def delete_chat(chat_id):
 	if len(chats) == 1:
 		return chats.get().delete_instance()
 	elif len(chats) > 1:
-		logger.warning('{1} duplicates for chat_id=\'{0}\' exists! Entry has not been deleted'.format(chat_id, len(chats) - 1))
+		logger.warning('{1} duplicates for chat_id=\'{0}\' exist! Entry has not been deleted'.format(chat_id, len(chats) - 1))
 		return len(chats)
 	return 0
 
@@ -57,7 +57,7 @@ def set_password(chat_id, password):
 		chat = chat.get()
 		chat.password = password
 		return chat.save()
-	logger.warning('{1} duplicates for chat_id=\'{0}\' exists! Entry has not been updated'.format(chat_id, len(chat) - 1))
+	logger.warning('{1} duplicates for chat_id=\'{0}\' exist! Entry has not been updated'.format(chat_id, len(chat) - 1))
 	return len(chat)
 
 # Retrieves password-hash and returns it in case of succes, None - if error
@@ -66,7 +66,7 @@ def get_password(chat_id):
 	if len(chat) == 0:
 		return None
 	elif len(chat) > 1:
-		logger.warning('{1} duplicates for chat_id=\'{0}\' exists! Ignored'.format(chat_id, len(chat) - 1))
+		logger.warning('{1} duplicates for chat_id=\'{0}\' exist! Ignored'.format(chat_id, len(chat) - 1))
 	return chat.get().password
 
 # Creates record (first checking chat_id for existance and creating if absent) and returns 1 - on success, 0 - otherwise
@@ -76,8 +76,22 @@ def create_record(chat_id, data):
 		logger.warning('Chat with chat_id=\'{0}\' could not be found!'
 					   'Record will be saved, chat will be created, but no password stored!'.format(chat_id))
 	elif len(chat) > 1:
-		logger.warning('{1} duplicates for chat_id=\'{0}\' exists!'
+		logger.warning('{1} duplicates for chat_id=\'{0}\' exist!'
 					   'Record will be saved for chat_uid=\'{2}\''.format(chat_id, len(chat) - 1, chat.id))
 
 	record = Record(chat_uid=chat_id, timestamp=timestamp_now(), data=data)
 	return record.save()
+
+# Deletes all data connected with given chat_id. returns number of deletions from tables (chats, records)
+def delete_all(chat_id):
+	chat = Chat.select(Chat.chat_id).where(Chat.chat_id == chat_id)
+	if len(chat) == 0:
+		logger.warning('Chat with chat_id=\'{0}\' could not be found!'
+					   'Trying to delete without foregin key constraint!')
+		chat = chat_id
+	elif len(chat) > 1:
+		logger.warning('{1} duplicates for chat_id=\'{0}\' exist!')
+
+	records = Record.delete().where(Record.chat_uid == chat).execute()
+	chat = Chat.delete().where(Chat.chat_id == chat_id).execute()
+	return (chat, records)
