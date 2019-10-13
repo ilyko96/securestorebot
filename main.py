@@ -40,7 +40,7 @@ def every_signal_checks(upd, ctx):
 def is_authorized(ctx):
 	return 'authorized' in ctx.user_data \
 			and ctx.user_data['authorized'] is not None \
-			and timestamp_now() - ctx.user_data['authorized'] <= 30
+			and timestamp_now() - ctx.user_data['authorized'] <= DEFAULT_UNAUTH_TIMER
 
 # Is called when user is inactive for specified time. Shows corresponding msg and TODO: changes conversation state
 def authorization_alarm(alarm_ctx):
@@ -50,8 +50,8 @@ def authorization_alarm(alarm_ctx):
 	ctx = job.context['ctx']
 	chat_id = upd.message.chat_id
 
-	ctx.bot.send_message(chat_id, text='You were inactive for 30 seconds, so now you need to prove your identity.\n'
-									   'Enter the password, please.', reply_markup=ReplyKeyboardRemove())
+	ctx.bot.send_message(chat_id, text='You were inactive for {0} seconds, so now you need to prove your identity.\n'
+									   'Enter the password, please.'.format(DEFAULT_UNAUTH_TIMER), reply_markup=ReplyKeyboardRemove())
 	ctx.user_data.pop('authorized_job', None)
 	update_authorization_timer(upd, ctx, unauthorize=True)
 	ctx.user_data['password_mode'] = MODE_PWD_TEST
@@ -71,27 +71,37 @@ def update_authorization_timer(upd, ctx, unauthorize=False):
 		if 'authorized_job' in ctx.user_data:
 			logger.info('update_authorization_timer: job removed'.format(ctx.user_data['authorized'], unauthorize))
 			ctx.user_data['authorized_job'].schedule_removal()
-		ctx.user_data['authorized_job'] = ctx.job_queue.run_once(authorization_alarm, 30, context={'upd': upd, 'ctx': ctx})
+		ctx.user_data['authorized_job'] = ctx.job_queue.run_once(authorization_alarm, DEFAULT_UNAUTH_TIMER, context={'upd': upd, 'ctx': ctx})
 		logger.info('update_authorization_timer: job created'.format(ctx.user_data['authorized'], unauthorize))
 
 # Entry point
 def start(upd, ctx):
-	# ctx.user_data contains 3 password fields:
+	# ctx.user_data contains 4 password fields:
+	#	'start_password'- True if password was given instead of /start command
 	# 	'password'		- contains hash-sum of real password
 	#	'password_mode'	- takes one of MODE_PWD_SET/MODE_PWD_TEST/MODE_PWD_AUTHORIZED and indicates current state
 	#	'authorized'	- either None/integer, correspondingly indicating absence of authorization or the time of last authorization
 
 	chat_id = upd.message.chat_id
-	# Add new chat_id to DB
-	dbh.create_chat_if_not_exist(chat_id)
+
+	dbh.create_chat_if_not_exist(chat_id) # Add new chat_id to DB
 	pwd = dbh.get_password(chat_id)
 
 	# if pwd is None: # Seems to be redundant
 	# 	logger.warning('Chat #{0} could not be found. Creating new entry.'.format(chat_id))
 
 	# If password is already set
-	if isinstance(pwd, str) and len(pwd) > 0:
-		ctx.user_data['password'] = pwd.encode()
+	if pwd is not None and len(pwd) > 0:
+		if isinstance(pwd, str):
+			pwd = pwd.encode()
+		ctx.user_data['password'] = pwd
+
+		# Handle case when start() is called from received_password() due to pwd given instead of /start
+		if 'start_password' in ctx.user_data and ctx.user_data['start_password'] is not None:
+			ctx.user_data.pop('start_password', None)
+			ctx.user_data['password_mode'] = MODE_PWD_TEST
+			update_authorization_timer(upd, ctx, unauthorize=True)
+			return
 
 		# If authorization still valid
 		if is_authorized(ctx):
@@ -126,14 +136,17 @@ def received_password(upd, ctx):
 	if upd.message.text is None or len(upd.message.text) == 0:
 		return
 
+	chat_id = upd.message.chat_id
+
 	is_weak = is_password_weak(upd.message.text)
 	hash = get_hash(upd.message.text)
 	upd.message.delete()
 
-	# Should be always False
+	# Case when entry point is not /start but password
 	if 'password_mode' not in ctx.user_data:
-		logger.warning('Not \'password_mode\' key in \'ctx.user_data\' dict! Considering \'password_set\' action')
-		ctx.user_data['password_mode'] = MODE_PWD_SET
+		# logger.warning('Not \'password_mode\' key in \'ctx.user_data\' dict! Considering \'password_set\' action')
+		ctx.user_data['start_password'] = True
+		start(upd, ctx)
 
 	# Nothing to do if already authorized
 	if ctx.user_data['password_mode'] == MODE_PWD_AUTHORIZED:
@@ -212,20 +225,26 @@ def password_btn_clicked(upd, ctx):
 		upd.message.reply_text('That\'s a good idea. Create a new strong password, remember it and send it to me.')
 		return STATE_TYPING_PASSWORD
 	elif text == BTN_PWD_NEW:
+		records = dbh.get_records_overview(chat_id)
+		ctx.user_data['number_of_records'] = len(records)
 		upd.message.reply_text('This will completely destroy all stored information '
 							   '(incl. current password fingerprint and all records) '
 							   'and start over from scratch.\n'
 							   'If you really want to continue send me the following message: \'{0}\''
-							   .format(CONSCIOUS_CONFIRMATION_MSG.format(10)))
+							   .format(CONSCIOUS_CONFIRMATION_MSG.format(len(records))))
 		return STATE_CHOOSE_PASSWORD_ACTION
-	elif text == CONSCIOUS_CONFIRMATION_MSG.format(10):
-		ndel_chat, ndel_recs = dbh.delete_all(chat_id)
-		ctx.user_data.clear()
-		upd.message.reply_text('Your data was successfully destroyed! Our database now is by {0} records thinner ;)\n'
-							   'Have a nice day and feel free to come back any time you want.\n'
-							   'Use command /start (or the button below) to start over.'.format(ndel_recs),
-							   reply_markup=ReplyKeyboardMarkup([[BTN_START]], one_time_keyboard=True))
-		return STATE_START
+	else:
+		if 'number_of_records' not in ctx.user_data or ctx.user_data['number_of_records'] is None:
+			records = dbh.get_records_overview(chat_id)
+			ctx.user_data['number_of_records'] = len(records)
+		if text == CONSCIOUS_CONFIRMATION_MSG.format(ctx.user_data['number_of_records']):
+			ndel_chat, ndel_recs = dbh.delete_all(chat_id)
+			ctx.user_data.clear()
+			upd.message.reply_text('Your data was successfully destroyed! Our database now is by {0} records thinner ;)\n'
+								   'Have a nice day and feel free to come back any time you want.\n'
+								   'Use command /start (or the button below) to start over.'.format(ndel_recs),
+								   reply_markup=ReplyKeyboardMarkup([[BTN_START]], one_time_keyboard=True))
+			return STATE_START
 
 # Logs user out, making him unauthorized
 def logout(upd, ctx):
@@ -244,12 +263,13 @@ def idle_button_clicked(upd, ctx):
 			"Tell me your secret")
 		return STATE_TYPING_RECORD
 
+# TODO: handle case when 1 msg is not enough to deliver all data
 # Receives message, encrypts and stores into DB
 def encrypt_data(upd, ctx):
 	key = dbh.get_password(upd.message.chat_id)
 	ln = len(upd.message.text)
 	encrypted = encrypt_string(upd.message.text, key)
-	upd.message.delete()
+	upd.effective_message.delete()
 
 	ctx.user_data['data'] = encrypted
 
@@ -295,8 +315,35 @@ def cancel_adding_record(upd, ctx):
 
 # Handles click on button 'Browse' from STATE_IDLE
 def browse_records(upd, ctx):
+	chat_id = upd.message.chat_id
+
+	records = dbh.get_records_overview(chat_id)
+
+	# Should probably never happen ;)
+	if records == None:
+		upd.message.reply_text(
+			"Some error happend while trying to retrieve your data. This case has already been reported. Try again later",
+			reply_markup=ReplyKeyboardMarkup(markup_idle, one_time_keyboard=True))
+		return STATE_IDLE
+	# If no data found in DB
+	elif len(records) == 0:
+		upd.message.reply_text(
+			"You don't have any records yet. Use menu buttons to add new.",
+			reply_markup=ReplyKeyboardMarkup(markup_idle, one_time_keyboard=True))
+		return STATE_IDLE
+	# If data has been found
+
+	ctx.user_data['data_overview'] = records
+	msg_list = ''
+	i = 0
+	for r in records:
+		if i >= BROWSE_PAGE_LIMIT:
+			break
+		msg_list += '\n{0} [{1}]'.format(records[i]['timestamp'], records[i]['size'])
+		i += 1
+
 	upd.message.reply_text(
-		"Browse function is not implemented yet ;( Sorry..",
+		"Last {0}/{1} records are:\n{2}".format(BROWSE_PAGE_LIMIT, len(records), msg_list),
 		reply_markup=ReplyKeyboardMarkup(markup_idle, one_time_keyboard=True))
 	return STATE_IDLE
 
@@ -315,7 +362,10 @@ def main():
 	# Main conversation handler
 	conv_handler = ConversationHandler(
 		# Entry point
-		entry_points=[CommandHandler('start', start)],
+		entry_points=[
+			CommandHandler('start', start),
+			MessageHandler(Filters.all, received_password)
+		],
 
 		states={
 			STATE_START: [
