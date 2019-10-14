@@ -30,6 +30,8 @@ BTN_RECORD_CANCEL =	'Cancel'
 # Message that needs to be entered by user in order to destroy all data
 CONSCIOUS_CONFIRMATION_MSG = 'Consciously I remove all {0} records'
 
-DEFAULT_UNAUTH_TIMER = 30 # Amount of seconds after which bot unauthorizes user
+# Parameters that can be set up in [Settings]
+DEFAULT_UNAUTH_TIMER =		300		# Amount of seconds after which bot unauthorizes user
+DEFAULT_CLEAR_ON_LOGOUT =	True	# If bot should delete history on logout
 
 BROWSE_PAGE_LIMIT = 7 # Number of records that are being displayed on [Browse] button

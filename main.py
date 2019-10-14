@@ -25,6 +25,8 @@ logger = logging.getLogger(__name__)
 conv_handler = None
 markup_idle = [[BTN_RECORD, BTN_BROWSE], [BTN_SETTINGS, BTN_LOGOUT]]
 
+def store_msg_id(ctx, msg):
+	ctx.chat_data['msg_ids'].append(msg.message_id)
 
 # Checks and actions needed to be performed on each atomic signal received from user
 def every_signal_checks(upd, ctx):
@@ -32,15 +34,19 @@ def every_signal_checks(upd, ctx):
 	if not upd.message.chat.type == upd.message.chat.PRIVATE:
 		logger.warning("Added to group #{0}! Leaving...".format(upd.message.chat_id))
 		upd.message.bot.leave_chat(upd.message.chat_id)
+
 	# Check authorization state and update authorization timer
 	elif is_authorized(ctx):
 		update_authorization_timer(upd, ctx)
 
+	# Collect all message-ids in context in order to remove everything on logout
+	store_msg_id(ctx, upd.message)
+
 # Checks if authorization expired and returns True - is still authorized, False - o\w
 def is_authorized(ctx):
-	return 'authorized' in ctx.user_data \
-			and ctx.user_data['authorized'] is not None \
-			and timestamp_now() - ctx.user_data['authorized'] <= DEFAULT_UNAUTH_TIMER
+	return 'authorized' in ctx.chat_data \
+			and ctx.chat_data['authorized'] is not None \
+			and timestamp_now() - ctx.chat_data['authorized'] <= DEFAULT_UNAUTH_TIMER
 
 # Is called when user is inactive for specified time. Shows corresponding msg and TODO: changes conversation state
 def authorization_alarm(alarm_ctx):
@@ -50,33 +56,34 @@ def authorization_alarm(alarm_ctx):
 	ctx = job.context['ctx']
 	chat_id = upd.message.chat_id
 
-	ctx.bot.send_message(chat_id, text='You were inactive for {0} seconds, so now you need to prove your identity.\n'
+	msg = ctx.bot.send_message(chat_id, text='You were inactive for {0} seconds, so now you need to prove your identity.\n'
 									   'Enter the password, please.'.format(DEFAULT_UNAUTH_TIMER), reply_markup=ReplyKeyboardRemove())
-	ctx.user_data.pop('authorized_job', None)
+	store_msg_id(ctx, msg)
+	ctx.chat_data.pop('authorized_job', None)
 	update_authorization_timer(upd, ctx, unauthorize=True)
-	ctx.user_data['password_mode'] = MODE_PWD_TEST
+	ctx.chat_data['password_mode'] = MODE_PWD_TEST
 	logger.info('authorization_alarm')
 
 	conv_handler.update_state(STATE_TYPING_PASSWORD, conv_handler._get_key(upd))
 
 # Called each time, when user makes action. Sets up new alarm instead of prev and updates authorization timestamp
 def update_authorization_timer(upd, ctx, unauthorize=False):
-	ctx.user_data['authorized'] = None if unauthorize else timestamp_now()
-	logger.info('update_authorization_timer: authorized={0}   unauthorize={1}'.format(ctx.user_data['authorized'], unauthorize))
+	ctx.chat_data['authorized'] = None if unauthorize else timestamp_now()
+	logger.info('update_authorization_timer: authorized={0}   unauthorize={1}'.format(ctx.chat_data['authorized'], unauthorize))
 	if unauthorize:
 		for job in ctx.job_queue.jobs():
 			job.schedule_removal()
-		logger.info('update_authorization_timer: all jobs removed'.format(ctx.user_data['authorized'], unauthorize))
+		logger.info('update_authorization_timer: all jobs removed'.format(ctx.chat_data['authorized'], unauthorize))
 	else:
-		if 'authorized_job' in ctx.user_data:
-			logger.info('update_authorization_timer: job removed'.format(ctx.user_data['authorized'], unauthorize))
-			ctx.user_data['authorized_job'].schedule_removal()
-		ctx.user_data['authorized_job'] = ctx.job_queue.run_once(authorization_alarm, DEFAULT_UNAUTH_TIMER, context={'upd': upd, 'ctx': ctx})
-		logger.info('update_authorization_timer: job created'.format(ctx.user_data['authorized'], unauthorize))
+		if 'authorized_job' in ctx.chat_data:
+			logger.info('update_authorization_timer: job removed'.format(ctx.chat_data['authorized'], unauthorize))
+			ctx.chat_data['authorized_job'].schedule_removal()
+		ctx.chat_data['authorized_job'] = ctx.job_queue.run_once(authorization_alarm, DEFAULT_UNAUTH_TIMER, context={'upd': upd, 'ctx': ctx})
+		logger.info('update_authorization_timer: job created'.format(ctx.chat_data['authorized'], unauthorize))
 
 # Entry point
 def start(upd, ctx):
-	# ctx.user_data contains 4 password fields:
+	# ctx.chat_data contains 4 password fields:
 	#	'start_password'- True if password was given instead of /start command
 	# 	'password'		- contains hash-sum of real password
 	#	'password_mode'	- takes one of MODE_PWD_SET/MODE_PWD_TEST/MODE_PWD_AUTHORIZED and indicates current state
@@ -87,6 +94,8 @@ def start(upd, ctx):
 	dbh.create_chat_if_not_exist(chat_id) # Add new chat_id to DB
 	pwd = dbh.get_password(chat_id)
 
+	ctx.chat_data['msg_ids'] = []
+
 	# if pwd is None: # Seems to be redundant
 	# 	logger.warning('Chat #{0} could not be found. Creating new entry.'.format(chat_id))
 
@@ -94,40 +103,43 @@ def start(upd, ctx):
 	if pwd is not None and len(pwd) > 0:
 		if isinstance(pwd, str):
 			pwd = pwd.encode()
-		ctx.user_data['password'] = pwd
+		ctx.chat_data['password'] = pwd
 
 		# Handle case when start() is called from received_password() due to pwd given instead of /start
-		if 'start_password' in ctx.user_data and ctx.user_data['start_password'] is not None:
-			ctx.user_data.pop('start_password', None)
-			ctx.user_data['password_mode'] = MODE_PWD_TEST
+		if 'start_password' in ctx.chat_data and ctx.chat_data['start_password'] is not None:
+			ctx.chat_data.pop('start_password', None)
+			ctx.chat_data['password_mode'] = MODE_PWD_TEST
 			update_authorization_timer(upd, ctx, unauthorize=True)
 			return
 
 		# If authorization still valid
 		if is_authorized(ctx):
-			ctx.user_data['password_mode'] = MODE_PWD_AUTHORIZED
-			upd.message.reply_text(
+			ctx.chat_data['password_mode'] = MODE_PWD_AUTHORIZED
+			msg = upd.message.reply_text(
 				"Hi again! My name is Charles. You can trust me all your secrets and nobody will ever have known about them except you.\n"
 				"Use menu buttons to start securely storing your data.",
 				reply_markup=ReplyKeyboardMarkup([[BTN_RECORD, BTN_BROWSE],
 												  [BTN_PWD_CHANGE]], one_time_keyboard=True))
+			store_msg_id(ctx, msg)
 			return STATE_IDLE
 		# If no authorization or expired
 		else:
-			ctx.user_data['password_mode'] = MODE_PWD_TEST
+			ctx.chat_data['password_mode'] = MODE_PWD_TEST
 			update_authorization_timer(upd, ctx, unauthorize=True)
-			upd.message.reply_text(
+			msg = upd.message.reply_text(
 				"Hi again! My name is Charles. You can trust me all your secrets and nobody will ever have known about them except you.\n"
 				"Please, send me the password first, so I can trust you")
+			store_msg_id(ctx, msg)
 			return STATE_TYPING_PASSWORD
 
 	# If password need to be set
-	ctx.user_data['password_mode'] = MODE_PWD_SET
+	ctx.chat_data['password_mode'] = MODE_PWD_SET
 	update_authorization_timer(upd, ctx, unauthorize=True)
-	upd.message.reply_text(
+	msg = upd.message.reply_text(
 		"Hi! My name is Charles. You can trust me all your secrets and nobody will ever have known about them except you. "
 		"Please send me the password to start.\n\n"
 		"Notice, there is no way recover data if the password is lost! So, please, remember it for sure!!!")
+	store_msg_id(ctx, msg)
 	return STATE_TYPING_PASSWORD
 
 # Checks given password
@@ -143,62 +155,69 @@ def received_password(upd, ctx):
 	upd.message.delete()
 
 	# Case when entry point is not /start but password
-	if 'password_mode' not in ctx.user_data:
-		# logger.warning('Not \'password_mode\' key in \'ctx.user_data\' dict! Considering \'password_set\' action')
-		ctx.user_data['start_password'] = True
+	if 'password_mode' not in ctx.chat_data:
+		# logger.warning('Not \'password_mode\' key in \'ctx.chat_data\' dict! Considering \'password_set\' action')
+		ctx.chat_data['start_password'] = True
 		start(upd, ctx)
 
 	# Nothing to do if already authorized
-	if ctx.user_data['password_mode'] == MODE_PWD_AUTHORIZED:
-		upd.message.reply_text('Authorized successfully! Use menu buttons to securely store your secrets',
+	if ctx.chat_data['password_mode'] == MODE_PWD_AUTHORIZED:
+		msg = upd.message.reply_text('Authorized successfully! Use menu buttons to securely store your secrets',
 							   reply_markup=ReplyKeyboardMarkup(markup_idle, one_time_keyboard=True))
+		store_msg_id(ctx, msg)
 		return STATE_IDLE
 
 	# Entered password needs to be used for authorization
-	if ctx.user_data['password_mode'] == MODE_PWD_TEST:
+	if ctx.chat_data['password_mode'] == MODE_PWD_TEST:
 		# Entered password is correct
-		if ctx.user_data['password'] == hash:
-			ctx.user_data['password_mode'] = MODE_PWD_AUTHORIZED
+		if ctx.chat_data['password'] == hash:
+			ctx.chat_data['password_mode'] = MODE_PWD_AUTHORIZED
 			update_authorization_timer(upd, ctx)
-			upd.message.reply_text('Successfully authorized! You can now begin securely storing your data',
+			msg = upd.message.reply_text('Successfully authorized! You can now begin securely storing your data',
 								   reply_markup=ReplyKeyboardMarkup(markup_idle, one_time_keyboard=True))
+			store_msg_id(ctx, msg)
 			return STATE_IDLE
 		# Entered password is incorrect
 		else:
 			# TODO: add here counter and only show keyboard on 3rd attempt
 			update_authorization_timer(upd, ctx, unauthorize=True)
-			upd.message.reply_text('Ooopsie... Entered password is incorrect! You can try again or set up a new password.\n',
+			msg = upd.message.reply_text('Ooopsie... Entered password is incorrect! You can try again or set up a new password.\n',
 								   reply_markup=ReplyKeyboardMarkup([[BTN_PWD_TRYAGAIN, BTN_PWD_NEW]], one_time_keyboard=True))
+			store_msg_id(ctx, msg)
 			return STATE_CHOOSE_PASSWORD_ACTION
 
 	# User needs to set up the password
-	if ctx.user_data['password_mode'] == MODE_PWD_SET:
+	if ctx.chat_data['password_mode'] == MODE_PWD_SET:
 		# First entry of password
-		if 'password' not in ctx.user_data:
-			ctx.user_data['password'] = hash
+		if 'password' not in ctx.chat_data:
+			ctx.chat_data['password'] = hash
 			if is_weak:
-				upd.message.reply_text('The password you entered is weak and does not provide enough security!\n'
+				msg = upd.message.reply_text('The password you entered is weak and does not provide enough security!\n'
 									   'It is highly recommended to come up with reliable password, which satisfies:\n'
 									   '- At least 8 symbols\n'
 									   '- Consist of a-z, A-Z, 0-9 and/or special symbols @#$%^&+=\n\n'
 									   'Do you want to change your opinion and create stronger password?',
 									   reply_markup=ReplyKeyboardMarkup([[BTN_PWD_STRONGER, BTN_PWD_LEAVEWEAK]], one_time_keyboard=True))
+				store_msg_id(ctx, msg)
 				return STATE_CHOOSE_PASSWORD_ACTION
 			else:
-				upd.message.reply_text('Please send me the password again (and remember it properly!).')
+				msg = upd.message.reply_text('Please send me the password again (and remember it properly!).')
+				store_msg_id(ctx, msg)
 				return STATE_TYPING_PASSWORD
 		# Repetition of password
 		else:
-			if ctx.user_data['password'] != hash:
-				upd.message.reply_text('Ooopsie! The passwords do not match! Please try again or create new password.',
+			if ctx.chat_data['password'] != hash:
+				msg = upd.message.reply_text('Ooopsie! The passwords do not match! Please try again or create new password.',
 									   reply_markup=ReplyKeyboardMarkup([[BTN_PWD_TRYAGAIN, BTN_PWD_STARTOVER]], one_time_keyboard=True))
+				store_msg_id(ctx, msg)
 				return STATE_CHOOSE_PASSWORD_ACTION
 			else:
-				dbh.set_password(upd.message.chat_id, ctx.user_data['password'])
-				ctx.user_data['password_mode'] = MODE_PWD_AUTHORIZED
+				dbh.set_password(upd.message.chat_id, ctx.chat_data['password'])
+				ctx.chat_data['password_mode'] = MODE_PWD_AUTHORIZED
 				update_authorization_timer(upd, ctx)
-				upd.message.reply_text('Password successfully created! You can now begin securely storing your data',
+				msg = upd.message.reply_text('Password successfully created! You can now begin securely storing your data',
 									   reply_markup=ReplyKeyboardMarkup(markup_idle, one_time_keyboard=True))
+				store_msg_id(ctx, msg)
 				return STATE_IDLE
 
 # TODO: change elifs to handlers (or just somehow reorganize properly)
@@ -208,59 +227,76 @@ def password_btn_clicked(upd, ctx):
 	chat_id = upd.message.chat_id
 
 	if text == BTN_PWD_STRONGER:
-		ctx.user_data.pop('password', None)
-		upd.message.reply_text('Very nice decision! Please send me strong password now.\n'
+		ctx.chat_data.pop('password', None)
+		msg = upd.message.reply_text('Very nice decision! Please send me strong password now.\n'
 							   'Notice, there is no way recover data if the password is lost! So, please, remember it carefully!!!')
+		store_msg_id(ctx, msg)
 		return STATE_TYPING_PASSWORD
 	elif text == BTN_PWD_LEAVEWEAK:
-		upd.message.reply_text('I\'m only offering and it is your responsibility for this decision.\n'
+		msg = upd.message.reply_text('I\'m only offering and it is your responsibility for this decision.\n'
 							   'Please repeat the password again, so I can check that you remembered it properly')
+		store_msg_id(ctx, msg)
 		return STATE_TYPING_PASSWORD
 	elif text == BTN_PWD_TRYAGAIN:
-		upd.message.reply_text('Send me the password again (and remember it properly!).\n'
+		msg = upd.message.reply_text('Send me the password again (and remember it properly!).\n'
 							   'Please check if [CAPS Lock] is off and you are using correct keyboard layout.')
+		store_msg_id(ctx, msg)
 		return STATE_TYPING_PASSWORD
 	elif text == BTN_PWD_STARTOVER:
-		ctx.user_data.pop('password', None)
-		upd.message.reply_text('That\'s a good idea. Create a new strong password, remember it and send it to me.')
+		ctx.chat_data.pop('password', None)
+		msg = upd.message.reply_text('That\'s a good idea. Create a new strong password, remember it and send it to me.')
+		store_msg_id(ctx, msg)
 		return STATE_TYPING_PASSWORD
 	elif text == BTN_PWD_NEW:
 		records = dbh.get_records_overview(chat_id)
-		ctx.user_data['number_of_records'] = len(records)
-		upd.message.reply_text('This will completely destroy all stored information '
+		ctx.chat_data['number_of_records'] = len(records)
+		msg = upd.message.reply_text('This will completely destroy all stored information '
 							   '(incl. current password fingerprint and all records) '
 							   'and start over from scratch.\n'
 							   'If you really want to continue send me the following message: \'{0}\''
 							   .format(CONSCIOUS_CONFIRMATION_MSG.format(len(records))))
+		store_msg_id(ctx, msg)
 		return STATE_CHOOSE_PASSWORD_ACTION
 	else:
-		if 'number_of_records' not in ctx.user_data or ctx.user_data['number_of_records'] is None:
+		if 'number_of_records' not in ctx.chat_data or ctx.chat_data['number_of_records'] is None:
 			records = dbh.get_records_overview(chat_id)
-			ctx.user_data['number_of_records'] = len(records)
-		if text == CONSCIOUS_CONFIRMATION_MSG.format(ctx.user_data['number_of_records']):
+			ctx.chat_data['number_of_records'] = len(records)
+		if text == CONSCIOUS_CONFIRMATION_MSG.format(ctx.chat_data['number_of_records']):
 			ndel_chat, ndel_recs = dbh.delete_all(chat_id)
-			ctx.user_data.clear()
-			upd.message.reply_text('Your data was successfully destroyed! Our database now is by {0} records thinner ;)\n'
+			ctx.chat_data.clear()
+			msg = upd.message.reply_text('Your data was successfully destroyed! Our database now is by {0} records thinner ;)\n'
 								   'Have a nice day and feel free to come back any time you want.\n'
 								   'Use command /start (or the button below) to start over.'.format(ndel_recs),
 								   reply_markup=ReplyKeyboardMarkup([[BTN_START]], one_time_keyboard=True))
+			store_msg_id(ctx, msg)
 			return STATE_START
 
+# Delete all messages by their ids stored in chat_data['msg_ids'] for current session
+def clear_history(upd, ctx):
+	for msg_id in ctx.chat_data['msg_ids']:
+		try: ctx.bot.delete_message(upd.message.chat_id, msg_id)
+		except: pass
+
+# TODO: delete all messages history
 # Logs user out, making him unauthorized
 def logout(upd, ctx):
-	ctx.bot.send_message(upd.message.chat_id,
+	if DEFAULT_CLEAR_ON_LOGOUT:
+		clear_history(upd, ctx)
+	msg = ctx.bot.send_message(upd.message.chat_id,
 						 text='You were successfully logged out!\n'
 							  'Just send me your password whenever you want log in back again.', reply_markup=ReplyKeyboardRemove())
+	store_msg_id(ctx, msg)
 	update_authorization_timer(upd, ctx, unauthorize=True)
-	ctx.user_data['password_mode'] = MODE_PWD_TEST
+	ctx.chat_data['password_mode'] = MODE_PWD_TEST
 	return STATE_TYPING_PASSWORD
 
 # Requests user to enter data
 # TODO: only supports text messages now. Extend!
 def idle_button_clicked(upd, ctx):
 	if upd.message.text == BTN_RECORD:
-		upd.message.reply_text(
+		msg = upd.message.reply_text(
 			"Tell me your secret")
+		store_msg_id(ctx, msg)
 		return STATE_TYPING_RECORD
 
 # TODO: handle case when 1 msg is not enough to deliver all data
@@ -271,46 +307,51 @@ def encrypt_data(upd, ctx):
 	encrypted = encrypt_string(upd.message.text, key)
 	upd.effective_message.delete()
 
-	ctx.user_data['data'] = encrypted
+	ctx.chat_data['data'] = encrypted
 
-	upd.message.reply_text(
+	msg = upd.message.reply_text(
 		"Your message of length {0} has been successfully encrypted. Do you want to store it?".format(ln),
 		reply_markup=ReplyKeyboardMarkup([[BTN_RECORD_SAVE, BTN_RECORD_CANCEL]], one_time_keyboard=True))
+	store_msg_id(ctx, msg)
 	return STATE_CONFIRMING_RECORD
 
 # Handles user confirmation for storing created record
 def confirm_adding_record(upd, ctx):
 	# Should never be true due to code consistency
-	if 'data' not in ctx.user_data or ctx.user_data['data'] is None:
+	if 'data' not in ctx.chat_data or ctx.chat_data['data'] is None:
 		logger.warning('No data found in context for \'chat_id\'={}! Continuing without storing data!'.format(upd.message.chat_id))
-		upd.message.reply_text(
+		msg = upd.message.reply_text(
 			"Error occured while saving your data. This case is already reported. Please try again later",
 			reply_markup=ReplyKeyboardMarkup(markup_idle, one_time_keyboard=True))
+		store_msg_id(ctx, msg)
 
-	rec = dbh.create_record(upd.message.chat_id, ctx.user_data['data'])
+	rec = dbh.create_record(upd.message.chat_id, ctx.chat_data['data'])
 
 	if rec != 1:
 		logger.warning(
-			'Could not save record to database. chat_id=\'{0}\', data=\'{1}\''.format(upd.message.chat_id, ctx.user_data['data']))
-		upd.message.reply_text(
+			'Could not save record to database. chat_id=\'{0}\', data=\'{1}\''.format(upd.message.chat_id, ctx.chat_data['data']))
+		msg = upd.message.reply_text(
 			"Error occured while saving your data. This case is already reported. Please try again later",
 			reply_markup=ReplyKeyboardMarkup(markup_idle, one_time_keyboard=True))
+		store_msg_id(ctx, msg)
 		return STATE_IDLE
 
-	ln = len(ctx.user_data['data'])
-	ctx.user_data.pop('data', None)
-	upd.message.reply_text(
+	ln = len(ctx.chat_data['data'])
+	ctx.chat_data.pop('data', None)
+	msg = upd.message.reply_text(
 		"Your message of length {0} has been successfully saved".format(ln),
 		reply_markup=ReplyKeyboardMarkup(markup_idle, one_time_keyboard=True))
+	store_msg_id(ctx, msg)
 	return STATE_IDLE
 
 # Handles user cancellation for storing created record
 def cancel_adding_record(upd, ctx):
-	ln = len(ctx.user_data['data'])
-	ctx.user_data.pop('data', None)
-	upd.message.reply_text(
+	ln = len(ctx.chat_data['data'])
+	ctx.chat_data.pop('data', None)
+	msg = upd.message.reply_text(
 		"Your message of length {0} has been successfully deleted.".format(ln),
 		reply_markup=ReplyKeyboardMarkup(markup_idle, one_time_keyboard=True))
+	store_msg_id(ctx, msg)
 	return STATE_IDLE
 
 # Handles click on button 'Browse' from STATE_IDLE
@@ -321,19 +362,21 @@ def browse_records(upd, ctx):
 
 	# Should probably never happen ;)
 	if records == None:
-		upd.message.reply_text(
+		msg = upd.message.reply_text(
 			"Some error happend while trying to retrieve your data. This case has already been reported. Try again later",
 			reply_markup=ReplyKeyboardMarkup(markup_idle, one_time_keyboard=True))
+		store_msg_id(ctx, msg)
 		return STATE_IDLE
 	# If no data found in DB
 	elif len(records) == 0:
-		upd.message.reply_text(
+		msg = upd.message.reply_text(
 			"You don't have any records yet. Use menu buttons to add new.",
 			reply_markup=ReplyKeyboardMarkup(markup_idle, one_time_keyboard=True))
+		store_msg_id(ctx, msg)
 		return STATE_IDLE
 	# If data has been found
 
-	ctx.user_data['data_overview'] = records
+	ctx.chat_data['data_overview'] = records
 	msg_list = ''
 	i = 0
 	for r in records:
@@ -342,9 +385,10 @@ def browse_records(upd, ctx):
 		msg_list += '\n{0} [{1}]'.format(records[i]['timestamp'], records[i]['size'])
 		i += 1
 
-	upd.message.reply_text(
-		"Last {0}/{1} records are:\n{2}".format(BROWSE_PAGE_LIMIT, len(records), msg_list),
+	msg = upd.message.reply_text(
+		"Last {0}/{1} records are:\n{2}".format(len(records), BROWSE_PAGE_LIMIT, msg_list),
 		reply_markup=ReplyKeyboardMarkup(markup_idle, one_time_keyboard=True))
+	store_msg_id(ctx, msg)
 	return STATE_IDLE
 
 def error(update, context):
