@@ -56,6 +56,8 @@ def authorization_alarm(alarm_ctx):
 	ctx = job.context['ctx']
 	chat_id = upd.message.chat_id
 
+	if DEFAULT_CLEAR_ON_ALARM:
+		clear_history(upd, ctx)
 	msg = ctx.bot.send_message(chat_id, text='You were inactive for {0} seconds, so now you need to prove your identity.\n'
 									   'Enter the password, please.'.format(DEFAULT_UNAUTH_TIMER), reply_markup=ReplyKeyboardRemove())
 	store_msg_id(ctx, msg)
@@ -277,7 +279,6 @@ def clear_history(upd, ctx):
 		try: ctx.bot.delete_message(upd.message.chat_id, msg_id)
 		except: pass
 
-# TODO: delete all messages history
 # Logs user out, making him unauthorized
 def logout(upd, ctx):
 	if DEFAULT_CLEAR_ON_LOGOUT:
