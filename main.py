@@ -5,6 +5,7 @@
 """
 SecureStore
 """
+# TODO: clear all keyboards after each usage
 import logging
 
 from telegram import ReplyKeyboardMarkup, ReplyKeyboardRemove
@@ -71,17 +72,17 @@ def authorization_alarm(alarm_ctx):
 # Called each time, when user makes action. Sets up new alarm instead of prev and updates authorization timestamp
 def update_authorization_timer(upd, ctx, unauthorize=False):
 	ctx.chat_data['authorized'] = None if unauthorize else timestamp_now()
-	logger.info('update_authorization_timer: authorized={0}   unauthorize={1}'.format(ctx.chat_data['authorized'], unauthorize))
+	logger.debug('update_authorization_timer: authorized={0}   unauthorize={1}'.format(ctx.chat_data['authorized'], unauthorize))
 	if unauthorize:
 		for job in ctx.job_queue.jobs():
 			job.schedule_removal()
-		logger.info('update_authorization_timer: all jobs removed'.format(ctx.chat_data['authorized'], unauthorize))
+		logger.debug('update_authorization_timer: all jobs removed'.format(ctx.chat_data['authorized'], unauthorize))
 	else:
 		if 'authorized_job' in ctx.chat_data:
-			logger.info('update_authorization_timer: job removed'.format(ctx.chat_data['authorized'], unauthorize))
+			logger.debug('update_authorization_timer: job removed'.format(ctx.chat_data['authorized'], unauthorize))
 			ctx.chat_data['authorized_job'].schedule_removal()
 		ctx.chat_data['authorized_job'] = ctx.job_queue.run_once(authorization_alarm, DEFAULT_UNAUTH_TIMER, context={'upd': upd, 'ctx': ctx})
-		logger.info('update_authorization_timer: job created'.format(ctx.chat_data['authorized'], unauthorize))
+		logger.debug('update_authorization_timer: job created'.format(ctx.chat_data['authorized'], unauthorize))
 
 # Entry point
 def start(upd, ctx):
@@ -278,6 +279,7 @@ def clear_history(upd, ctx):
 	for msg_id in ctx.chat_data['msg_ids']:
 		try: ctx.bot.delete_message(upd.message.chat_id, msg_id)
 		except: pass
+	ctx.chat_data['msg_ids'] = []
 
 # Logs user out, making him unauthorized
 def logout(upd, ctx):
