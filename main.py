@@ -26,7 +26,10 @@ logger = logging.getLogger(__name__)
 conv_handler = None
 markup_idle = [[BTN_RECORD, BTN_BROWSE], [BTN_SETTINGS, BTN_LOGOUT]]
 
+# Keep track of IDs of all messages created during session in order to be able to clear all of them on logout
 def store_msg_id(ctx, msg):
+	if 'msg_ids' not in ctx.chat_data or ctx.chat_data['msg_ids'] is None:
+		ctx.chat_data['msg_ids'] = []
 	ctx.chat_data['msg_ids'].append(msg.message_id)
 
 # Checks and actions needed to be performed on each atomic signal received from user
