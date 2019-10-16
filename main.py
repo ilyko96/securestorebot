@@ -8,9 +8,8 @@ SecureStore
 # TODO: clear all keyboards after each usage
 import logging
 
-from telegram import ReplyKeyboardMarkup, ReplyKeyboardRemove
-from telegram.ext import (Updater, CommandHandler, MessageHandler, Filters,
-						  ConversationHandler)
+from telegram import ReplyKeyboardMarkup, ReplyKeyboardRemove, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import (Updater, CommandHandler, MessageHandler, Filters, ConversationHandler, CallbackQueryHandler)
 
 import db_handler as dbh
 from api_token import TOKEN
@@ -68,7 +67,7 @@ def authorization_alarm(alarm_ctx):
 	ctx.chat_data.pop('authorized_job', None)
 	update_authorization_timer(upd, ctx, unauthorize=True)
 	ctx.chat_data['password_mode'] = MODE_PWD_TEST
-	logger.info('authorization_alarm')
+	logger.debug('authorization_alarm')
 
 	conv_handler.update_state(STATE_TYPING_PASSWORD, conv_handler._get_key(upd))
 
@@ -100,7 +99,8 @@ def start(upd, ctx):
 	dbh.create_chat_if_not_exist(chat_id) # Add new chat_id to DB
 	pwd = dbh.get_password(chat_id)
 
-	ctx.chat_data['msg_ids'] = []
+	if 'msg_ids' not in ctx.chat_data or ctx.chat_data['msg_ids'] is None:
+		ctx.chat_data['msg_ids'] = []
 
 	# if pwd is None: # Seems to be redundant
 	# 	logger.warning('Chat #{0} could not be found. Creating new entry.'.format(chat_id))
@@ -269,6 +269,9 @@ def password_btn_clicked(upd, ctx):
 			ctx.chat_data['number_of_records'] = len(records)
 		if text == CONSCIOUS_CONFIRMATION_MSG.format(ctx.chat_data['number_of_records']):
 			ndel_chat, ndel_recs = dbh.delete_all(chat_id)
+			if DEFAULT_CLEAR_ON_LOGOUT:
+				clear_history(upd, ctx)
+			update_authorization_timer(upd, ctx, unauthorize=True)
 			ctx.chat_data.clear()
 			msg = upd.message.reply_text('Your data was successfully destroyed! Our database now is by {0} records thinner ;)\n'
 								   'Have a nice day and feel free to come back any time you want.\n'
@@ -380,22 +383,47 @@ def browse_records(upd, ctx):
 			reply_markup=ReplyKeyboardMarkup(markup_idle, one_time_keyboard=True))
 		store_msg_id(ctx, msg)
 		return STATE_IDLE
-	# If data has been found
 
+	# If data has been found
 	ctx.chat_data['data_overview'] = records
-	msg_list = ''
+
+	if 'browse_page' not in ctx.chat_data or ctx.chat_data['browse_page'] is None:
+		ctx.chat_data['browse_page'] = 0
+	page = ctx.chat_data['browse_page']
+
+	msg_list = '[index] datetime {length}'
 	i = 0
 	for r in records:
 		if i >= BROWSE_PAGE_LIMIT:
 			break
-		msg_list += '\n{0} [{1}]'.format(records[i]['timestamp'], records[i]['size'])
+		msg_list += '\n[{0}] {1} {{2}}'.format(
+			i,
+			timestamp_format(records[i]['timestamp']),
+			records[i]['size'])
 		i += 1
 
+	keyboard = []
+	if page * BROWSE_PAGE_LIMIT < len(records):
+		keyboard = [[InlineKeyboardButton(BTN_BROWSE_NEXT, callback_data=str(1))]]
+	if page > 0:
+		keyboard.insert(0, [InlineKeyboardButton(BTN_BROWSE_PREV, callback_data=str(2))])
+	btnBack = InlineKeyboardButton(BTN_BROWSE_BACK, callback_data=str(3))
+	if len(keyboard) > 0:
+		keyboard.insert(1, [btnBack])
+	else:
+		keyboard = [[btnBack]]
+
+	markup = InlineKeyboardMarkup(keyboard)
+
 	msg = upd.message.reply_text(
-		"Last {0}/{1} records are:\n{2}".format(len(records), BROWSE_PAGE_LIMIT, msg_list),
-		reply_markup=ReplyKeyboardMarkup(markup_idle, one_time_keyboard=True))
+		"Last {0}-{1}/{2} records are:\n{3}".format(
+			page * BROWSE_PAGE_LIMIT,
+			min(len(records), BROWSE_PAGE_LIMIT),
+			len(records),
+			msg_list),
+		reply_markup=markup)
 	store_msg_id(ctx, msg)
-	return STATE_IDLE
+	return STATE_BROWSING
 
 def error(update, context):
 	"""Log Errors caused by Updates."""
@@ -439,6 +467,9 @@ def main():
 			STATE_CONFIRMING_RECORD: [
 				MessageHandler(Filters.regex('^{0}$'.format(BTN_RECORD_SAVE)), confirm_adding_record),
 				MessageHandler(Filters.regex('^{0}$'.format(BTN_RECORD_CANCEL)), cancel_adding_record)
+			],
+			STATE_BROWSING: [
+				CallbackQueryHandler(browse_records, pattern='^{0}$'.format(BTN_BROWSE_NEXT))
 			]
 		},
 

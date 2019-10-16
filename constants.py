@@ -4,7 +4,8 @@ STATE_IDLE, \
 STATE_TYPING_PASSWORD, \
 STATE_CHOOSE_PASSWORD_ACTION, \
 STATE_TYPING_RECORD,\
-STATE_CONFIRMING_RECORD = range(6)
+STATE_CONFIRMING_RECORD,\
+STATE_BROWSING = range(7)
 
 # Modes for ctx.user_data['password_mode'] flag
 MODE_PWD_SET,\
@@ -26,6 +27,9 @@ BTN_LOGOUT =		'Log out'
 BTN_START =			'Start'
 BTN_RECORD_SAVE =	'Save'
 BTN_RECORD_CANCEL =	'Cancel'
+BTN_BROWSE_PREV = 	'<< Previous'
+BTN_BROWSE_NEXT = 	'Next >>'
+BTN_BROWSE_BACK = 	'Back'
 
 # Message that needs to be entered by user in order to destroy all data
 CONSCIOUS_CONFIRMATION_MSG = 'Consciously I remove all {0} records'
