@@ -51,7 +51,8 @@ def is_authorized(ctx):
 			and ctx.chat_data['authorized'] is not None \
 			and timestamp_now() - ctx.chat_data['authorized'] <= DEFAULT_UNAUTH_TIMER
 
-# Is called when user is inactive for specified time. Shows corresponding msg and TODO: changes conversation state
+# TODO: make another longer alarm for clearing history if the authority was not proved
+# Is called when user is inactive for specified time. Shows corresponding msg and changes conversation state
 def authorization_alarm(alarm_ctx):
 	global conv_handler
 	job = alarm_ctx.job
@@ -469,7 +470,7 @@ def main():
 				MessageHandler(Filters.regex('^{0}$'.format(BTN_RECORD_CANCEL)), cancel_adding_record)
 			],
 			STATE_BROWSING: [
-				CallbackQueryHandler(browse_records, pattern='^{0}$'.format(BTN_BROWSE_NEXT))
+				CallbackQueryHandler(browse_records)
 			]
 		},
 
